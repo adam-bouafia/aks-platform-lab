@@ -1,0 +1,74 @@
+PROJECT-PLAN.md
+*.todo
+notes/
+
+# ==========================================
+# Secrets, Keys & Environment Variables
+# ==========================================
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+*.p12
+*.crt
+*.kubeconfig
+kubeconfig*
+secrets/
+credentials*
+
+# ==========================================
+# Terraform / OpenTofu
+# ==========================================
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+*.tfplan
+
+# ==========================================
+# Kubernetes & Helm
+# ==========================================
+charts/*.tgz
+*.secret.yaml
+*.secret.yml
+
+# ==========================================
+# Linux, macOS & Windows OS Files
+# ==========================================
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ==========================================
+# IDEs & Editors (VS Code, JetBrains, Vim)
+# ==========================================
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+
+# ==========================================
+# Logs & Temporary Files
+# ==========================================
+*.log
+*.tmp
+*.bak
+tmp/
+temp/
