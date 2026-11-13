@@ -23,6 +23,27 @@ a multi-stage Dockerfile that throws away the Go compiler and ships only the com
 binary, on top of a minimal base image with no shell and no package manager, running
 as an unprivileged user.
 
+## CI / supply chain
+
+[![Hardened CI Pipeline](https://github.com/adam-bouafia/aks-platform-lab/actions/workflows/ci.yml/badge.svg)](https://github.com/adam-bouafia/aks-platform-lab/actions/workflows/ci.yml)
+
+Every pull request into `main` runs:
+
+- **Lint & Test** - `go vet`, `go test -race`, `hadolint` on the Dockerfile
+- **IaC Security & Lint** - `tflint` and `trivy config` (currently a no-op until `infra/` exists in Phase 3)
+- **Build & Trivy Scan** - builds the hardened image, scans it with Trivy, fails the
+  build on any HIGH/CRITICAL vulnerability, uploads results as SARIF to the repo's
+  Security tab
+- **Generate CycloneDX SBOM** - a software bill of materials for the exact image that
+  was scanned, uploaded as a build artifact
+- **Push to GHCR** - on `main` only, pushes the already-scanned image tagged by the
+  git commit SHA (never `latest`)
+
+All actions are pinned by full commit SHA, not by tag. Branch protection on `main`
+requires every job above to pass, including for the repo admin, before a merge is
+allowed. Dependabot checks weekly for updates to Go modules, GitHub Actions and the
+Dockerfile's base image.
+
 ## 3. Architecture (target)
 
 ```mermaid
