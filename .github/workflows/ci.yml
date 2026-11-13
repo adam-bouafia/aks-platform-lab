@@ -152,7 +152,7 @@ jobs:
     needs: [build-scan]
     steps:
       - name: Download container image archive
-        uses: actions/download-artifact@95815c38cf2ff2164869cbab79da8d1f422bc89e # v4.2.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: container-image
           path: /tmp
@@ -184,7 +184,7 @@ jobs:
       packages: write # Required to push to GitHub Container Registry
     steps:
       - name: Download verified container image archive
-        uses: actions/download-artifact@95815c38cf2ff2164869cbab79da8d1f422bc89e # v4.2.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: container-image
           path: /tmp
