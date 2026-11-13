@@ -57,3 +57,29 @@ Prevent:     Never trust a generated `@<sha> # <tag>` pin at face value. Verify 
              pin with `git ls-remote --tags` (using the `^{}` peeled SHA for annotated
              tags) before committing a workflow file, especially for less common
              actions.
+
+## 2026-11-13 CI failed: trivy-action's own pinned version was broken upstream
+
+Symptom:     After fixing the setup-tflint SHA, CI failed again in a different step:
+             Error: Unable to resolve action `aquasecurity/setup-trivy@v0.2.1`, unable
+             to find version `v0.2.1`. That action is not referenced anywhere in
+             ci.yml directly.
+Looked at:   Fetched aquasecurity/trivy-action's own action.yaml at the pinned commit
+             (v0.28.0) and found it internally calls `uses: aquasecurity/setup-trivy@v0.2.1`
+             as a nested step. `git ls-remote --tags` on aquasecurity/setup-trivy showed
+             the oldest tag still present is v0.2.6 - v0.2.1 had been deleted/retagged
+             upstream. Checked the latest trivy-action release (v0.36.0) and confirmed
+             its action.yaml now pins setup-trivy to a commit SHA for v0.2.6, which
+             does exist.
+Root cause:  Our SHA pin for trivy-action@0.28.0 was valid, but that specific old
+             release of trivy-action itself has a broken internal dependency (an
+             upstream tag it references no longer exists). Pinning by SHA protects
+             against the tag moving, but not against the pinned release depending on
+             something that later disappears.
+Fix:         Upgraded the trivy-action pin to v0.36.0 (SHA a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8),
+             whose own internal setup-trivy reference is healthy.
+Prevent:     When a pinned action fails to resolve a *different* action than the one
+             named in the failing step, suspect a nested/composite action dependency.
+             Check the failing action's own action.yaml/action.yml at the pinned SHA.
+             Prefer reasonably recent releases of third-party actions, since very old
+             pinned versions can depend on upstream refs that get cleaned up over time.
