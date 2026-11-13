@@ -1,0 +1,204 @@
+name: Hardened CI Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Lint & Unit Test (Go + Dockerfile)
+  # ---------------------------------------------------------------------------
+  lint-test:
+    name: Lint & Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Go
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: app/go.mod
+          cache: true
+          cache-dependency-path: app/go.sum
+
+      - name: Run go vet
+        working-directory: app
+        run: go vet ./...
+
+      - name: Run unit tests with race detector
+        working-directory: app
+        run: go test -race -v ./...
+
+      - name: Lint Dockerfile with Hadolint
+        uses: hadolint/hadolint-action@54c9adbab1582c2ef04b2016b760714a4bfde3cf # v3.1.0
+        with:
+          dockerfile: app/Dockerfile
+          failure-threshold: error
+
+  # ---------------------------------------------------------------------------
+  # 2. Infrastructure as Code Scan
+  # ---------------------------------------------------------------------------
+  iac-scan:
+    name: IaC Security & Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Check if infra/ directory exists
+        id: check_infra
+        run: |
+          if [ -d "infra" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping IaC scans: infra/ directory not yet created (Phase 3)."
+          fi
+
+      - name: Setup TFLint
+        if: steps.check_infra.outputs.exists == 'true'
+        uses: terraform-linters/setup-tflint@90f302c255ef959cbfb4bd10581afecdb7ece3e6 # v4.1.1
+
+      - name: Run TFLint
+        if: steps.check_infra.outputs.exists == 'true'
+        working-directory: infra
+        run: |
+          tflint --init
+          tflint --recursive
+
+      - name: Run Trivy IaC Misconfiguration Scan
+        if: steps.check_infra.outputs.exists == 'true'
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        with:
+          scan-type: 'config'
+          scan-ref: 'infra/'
+          exit-code: '1'
+          severity: 'HIGH,CRITICAL'
+
+  # ---------------------------------------------------------------------------
+  # 3. Build Image & Vulnerability Scan (SARIF)
+  # ---------------------------------------------------------------------------
+  build-scan:
+    name: Build & Trivy Scan
+    runs-on: ubuntu-latest
+    needs: [lint-test, iac-scan]
+    permissions:
+      contents: read
+      security-events: write # Required to upload SARIF to the Security tab
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
+
+      - name: Build container image to local tar archive
+        uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4 # v6.15.0
+        with:
+          context: ./app
+          push: false
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          outputs: type=docker,dest=/tmp/image.tar
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run Trivy vulnerability scan (Generate SARIF)
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        with:
+          input: /tmp/image.tar
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'HIGH,CRITICAL'
+          ignore-unfixed: true
+
+      - name: Upload SARIF report to GitHub Security tab
+        if: always() # Upload findings even if the next step fails the build
+        uses: github/codeql-action/upload-sarif@b56ba49b26e50535fa1e7f7db0f4f7b4bf65d80d # v3.28.10
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      - name: Fail pipeline on HIGH or CRITICAL vulnerabilities
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        with:
+          input: /tmp/image.tar
+          format: 'table'
+          exit-code: '1'
+          severity: 'HIGH,CRITICAL'
+          ignore-unfixed: true
+
+      - name: Upload scanned image archive for SBOM & Push jobs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: container-image
+          path: /tmp/image.tar
+          retention-days: 1
+
+  # ---------------------------------------------------------------------------
+  # 4. Generate CycloneDX SBOM
+  # ---------------------------------------------------------------------------
+  sbom:
+    name: Generate CycloneDX SBOM
+    runs-on: ubuntu-latest
+    needs: [build-scan]
+    steps:
+      - name: Download container image archive
+        uses: actions/download-artifact@95815c38cf2ff2164869cbab79da8d1f422bc89e # v4.2.1
+        with:
+          name: container-image
+          path: /tmp
+
+      - name: Generate CycloneDX SBOM with Syft
+        uses: anchore/sbom-action@f325610c9f50a54015d37c8d16cb3b0e2c8f4de0 # v0.18.0
+        with:
+          image: docker-archive:/tmp/image.tar
+          format: cyclonedx-json
+          output-file: sbom.cdx.json
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cyclonedx-sbom-${{ github.sha }}
+          path: sbom.cdx.json
+          retention-days: 90
+
+  # ---------------------------------------------------------------------------
+  # 5. Push to GHCR (Main branch only, immutable SHA tag)
+  # ---------------------------------------------------------------------------
+  push:
+    name: Push Image to GHCR
+    runs-on: ubuntu-latest
+    needs: [lint-test, iac-scan, build-scan, sbom]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    permissions:
+      contents: read
+      packages: write # Required to push to GitHub Container Registry
+    steps:
+      - name: Download verified container image archive
+        uses: actions/download-artifact@95815c38cf2ff2164869cbab79da8d1f422bc89e # v4.2.1
+        with:
+          name: container-image
+          path: /tmp
+
+      - name: Load image into local Docker daemon
+        run: docker load --input /tmp/image.tar
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push immutable SHA-tagged image to GHCR
+        run: |
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
