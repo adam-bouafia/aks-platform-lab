@@ -33,3 +33,27 @@ Fix:         Run hadolint with the path relative to the current directory
              repeating the `app/` prefix.
 Prevent:     Check `pwd` before pasting a path from higher up the repo tree into a
              command run from inside a subdirectory.
+
+## 2026-11-13 CI failed: unable to resolve pinned action SHA
+
+Symptom:     GitHub Actions run failed immediately in "Prepare all required actions"
+             with: Error: Unable to resolve action
+             `terraform-linters/setup-tflint@99297851292694f0418c5f08843f29a853c529a1`,
+             unable to find version `99297851292694f0418c5f08843f29a853c529a1`.
+Looked at:   `git ls-remote --tags https://github.com/terraform-linters/setup-tflint.git`
+             to list the real commit SHA behind the v4.1.1 tag; it did not match what
+             was in ci.yml. Checked all 12 pinned actions in the file the same way
+             (for annotated tags, the real commit is the `^{}` peeled ref, not the
+             tag object itself) and found 6 wrong: setup-tflint, trivy-action,
+             codeql-action/upload-sarif, download-artifact, sbom-action, login-action.
+Root cause:  Several commit SHAs pinned in the workflow did not correspond to the
+             release tag named in their comment - likely fabricated/guessed rather
+             than copied from the real repo (one, docker/login-action, was off by
+             only a few characters from the real SHA, easy to miss on a visual read).
+Fix:         Looked up the real commit for each tag with
+             `git ls-remote --tags https://github.com/<owner>/<repo>.git` and replaced
+             every wrong SHA with the verified one.
+Prevent:     Never trust a generated `@<sha> # <tag>` pin at face value. Verify every
+             pin with `git ls-remote --tags` (using the `^{}` peeled SHA for annotated
+             tags) before committing a workflow file, especially for less common
+             actions.
