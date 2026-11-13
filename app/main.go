@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/subtle"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -10,6 +12,17 @@ import (
 )
 
 var secretPath = getenv("SECRET_PATH", "/mnt/secrets/api-key")
+
+type Transaction struct {
+	ID          string `json:"id"`
+	AmountCents int64  `json:"amount_cents"`
+	Currency    string `json:"currency"`
+}
+
+var transactions = []Transaction{
+	{ID: "tx-001", AmountCents: 12050, Currency: "EUR"},
+	{ID: "tx-002", AmountCents: -4500, Currency: "EUR"},
+}
 
 func main() {
 	// 1. Set up the JSON logger as the default
@@ -22,8 +35,8 @@ func main() {
 	// 3. Create the mux and register your first route
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", healthz)
-	mux.HandleFunc("GET /readyz", readyz)	
-	
+	mux.HandleFunc("GET /readyz", readyz)
+	mux.HandleFunc("GET /api/v1/transactions", listTransactions)
 	// 4. Configure the HTTP server with safe timeouts
 	srv := &http.Server{
 		Addr:         ":" + port,
@@ -65,4 +78,19 @@ func readyz(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusOK) // 200: key is there
 	fmt.Fprintln(w, "ready")
+}
+
+func listTransactions(w http.ResponseWriter, r *http.Request) {
+	data, err := os.ReadFile(secretPath) // the real key
+	key := strings.TrimSpace(string(data))
+	given := r.Header.Get("X-API-Key") // the key the caller sent
+
+	if err != nil || key == "" || subtle.ConstantTimeCompare([]byte(given), []byte(key)) != 1 {
+		w.WriteHeader(http.StatusUnauthorized) // 401
+		fmt.Fprintln(w, "unauthorized")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json") // tell the caller it's JSON
+	json.NewEncoder(w).Encode(transactions)            // turn the list into JSON and send it
 }
