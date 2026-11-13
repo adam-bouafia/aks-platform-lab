@@ -83,3 +83,30 @@ Prevent:     When a pinned action fails to resolve a *different* action than the
              Check the failing action's own action.yaml/action.yml at the pinned SHA.
              Prefer reasonably recent releases of third-party actions, since very old
              pinned versions can depend on upstream refs that get cleaned up over time.
+
+## 2026-11-13 CI failed: sbom-action's "path" input double-prefixed the scan target
+
+Symptom:     Generate CycloneDX SBOM job failed with "Error: The process
+             '/opt/hostedtoolcache/syft/1.19.0/x64/syft' failed with exit code 1".
+             The printed command showed the real problem:
+             `syft scan dir:docker-archive:/tmp/image.tar -o cyclonedx-json`
+             - two scheme prefixes glued together, which Syft can't parse.
+Looked at:   The workflow passed `path: docker-archive:/tmp/image.tar` to
+             anchore/sbom-action. Checked the action's README: `path` is documented
+             as "a path on the filesystem to scan", separate from `image` ("a
+             container image to scan"). Downloaded the action's compiled
+             dist/runSyftAction/index.js at the pinned SHA and found the exact
+             branching: the `image` input is passed to syft unprefixed, `file` gets
+             `file:` prepended, and `path` always gets `dir:` prepended - regardless
+             of what string you put in it.
+Root cause:  Used the wrong input. `path` is meant for a plain directory and always
+             gets `dir:` glued on the front, so giving it an already-complete
+             `docker-archive:...` scheme produced an invalid double-prefixed target.
+Fix:         Switched the step to use `image: docker-archive:/tmp/image.tar` instead
+             of `path:` - that input is forwarded to syft as-is, which is what a
+             scheme-prefixed scan target needs.
+Prevent:     When a wrapper action's documented inputs don't make the exact command
+             it will run obvious, read its actual source (the compiled dist/*.js for
+             a Node action) rather than guessing from the README's short description
+             alone - the parameter names can look interchangeable but build very
+             different commands underneath.
