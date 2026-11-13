@@ -36,3 +36,15 @@ Notes:
 - Makefile recipe lines must start with a Tab, not spaces (otherwise `missing separator`).
 - `kubectl version --client` only checks the local binary. Without `--client` it tries to reach a cluster.
 - kubectl must be within one minor version of the cluster.
+
+
+
+
+## 2026-11-13 15:00 - Docker daemon not running
+Symptom:     docker build / trivy image failed with "Cannot connect to the Docker
+             daemon at unix:///var/run/docker.sock"
+Looked at:   systemctl is-active docker -> inactive; systemctl is-enabled docker -> disabled
+Root cause:  Docker service was installed but never enabled/started on this machine
+Fix:         sudo systemctl enable --now docker
+Prevent:     check `systemctl is-active docker` whenever a docker/trivy command fails
+             with a socket-connection error, before assuming it's a build problem
