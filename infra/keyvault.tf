@@ -13,6 +13,12 @@ resource "azurerm_key_vault" "main" {
 
   rbac_authorization_enabled = true
   purge_protection_enabled   = false # lab only - prod needs this on, see notes/failures.md
+
+  network_acls {
+    default_action             = "Deny" # AZU-0013 - deny by default, only the AKS subnet and trusted Azure services get through
+    bypass                     = "AzureServices"
+    virtual_network_subnet_ids = [azurerm_subnet.aks.id]
+  }
 }
 
 # Terraform itself needs write access to create the secret below.
