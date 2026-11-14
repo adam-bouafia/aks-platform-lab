@@ -191,6 +191,61 @@ Prevent:     On a fresh subscription, before the first `terraform apply` that
              for anything relevant and register it ahead of time instead of
              discovering it mid-apply.
 
+## 2026-11-14 AKS create stuck 45+ min, then quota-blocked on every allowed SKU family
+
+Symptom:     First `terraform apply` for the AKS cluster sat at
+             "CreatingAgentPools: 0/1 nodes completed" (checked via
+             `az aks operation show`) for 45+ minutes with zero progress -
+             abnormal, normal node provisioning reaches a node within
+             5-10 minutes. Destroyed and recreated clean
+             (`terraform destroy` then `apply`); the second attempt failed
+             fast and explicitly: "ErrCode_InsufficientVCPUQuota ... 0
+             remaining for family StandardDasv7Family". Switching
+             `vm_size` to `Standard_D2s_v3` then failed differently:
+             "The VM size of Standard_D2s_v3 is not allowed in your
+             subscription in location 'germanywestcentral'" with a long
+             allow-list of permitted SKUs (all v6/v7-generation D/E/F
+             families, DC v5/v6, L v4/v5, M-series, and GPU NC/NV only -
+             no v3/v4 generation anywhere in it).
+Looked at:   `az vm list-usage --location <region>` for all 5 of the
+             region-policy-allowed regions (germanywestcentral,
+             francecentral, spaincentral, swedencentral, italynorth),
+             cross-checked against the AKS error's own allowed-SKU list.
+             Every non-GPU family AKS is permitted to use
+             (DASv7/DSv7/Dv7/ESv7/etc.) shows limit=0, current=0 in every
+             one of the 5 regions. Only GPU families (NC/NV) have nonzero
+             quota (6), which isn't appropriate for this lab (cost, and
+             GPU quota frequently needs separate manual approval even when
+             the number shown is nonzero).
+Root cause:  Two separate, compounding constraints on an "Azure for
+             Students" subscription: (1) a region-restriction policy
+             limiting deployment to 5 regions (see the earlier region
+             failure entry), and (2) AKS only permits newer-generation
+             (v6/v7+) VM SKUs for node pools on this subscription, but
+             this subscription was never granted any vCPU quota for those
+             newer-generation families in any of the 5 allowed regions -
+             only older-generation families (which AKS won't use at all)
+             and GPU families have quota. The 45-minute hang on the first
+             attempt was most likely the same underlying quota exhaustion
+             manifesting as a stall before Azure's backend gave up and
+             returned the explicit 400, rather than a separate bug.
+Fix:         Not fixed same night - this requires an actual Azure quota
+             increase request (Portal -> Quotas, or Help+support -> New
+             support request -> Service and subscription limits), not a
+             Terraform or naming change. Reverted `vm_size` back to
+             `Standard_D2as_v7` (confirmed on AKS's allow-list, just
+             needs quota) rather than leaving it on `Standard_D2s_v3`
+             (not on the allow-list at all, a dead end regardless of
+             quota).
+Prevent:     On a free/student/trial subscription, before relying on any
+             specific VM family for a managed service like AKS, check
+             both (a) the service's own allowed-SKU list for the
+             subscription (triggering the error once is the fastest way
+             to get it) and (b) `az vm list-usage` for that exact family
+             in that exact region - a "create" that hangs for an unusually
+             long time with no progress is itself a signal to check quota
+             before assuming it's just slow.
+
 ## 2026-11-13 Break-it drill: unhardened image rejected by CI
 
 Symptom:     N/A - deliberate test. Opened a PR replacing the distroless final
