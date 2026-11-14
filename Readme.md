@@ -30,7 +30,7 @@ as an unprivileged user.
 Every pull request into `main` runs:
 
 - **Lint & Test** - `go vet`, `go test -race`, `hadolint` on the Dockerfile
-- **IaC Security & Lint** - `tflint` and `trivy config` (currently a no-op until `infra/` exists in Phase 3)
+- **IaC Security & Lint** - `tflint` and `trivy config` against `infra/`
 - **Build & Trivy Scan** - builds the hardened image, scans it with Trivy, fails the
   build on any HIGH/CRITICAL vulnerability, uploads results as SARIF to the repo's
   Security tab
@@ -43,6 +43,16 @@ All actions are pinned by full commit SHA, not by tag. Branch protection on `mai
 requires every job above to pass, including for the repo admin, before a merge is
 allowed. Dependabot checks weekly for updates to Go modules, GitHub Actions and the
 Dockerfile's base image.
+
+## Infrastructure (Terraform)
+
+`infra/` holds the Azure foundation, applied from a local machine via `az login`
+
+- Resource group, VNet (`10.10.0.0/16`) and an AKS subnet (`10.10.1.0/24`) applied.
+- AKS cluster (`aks-ledger-lab`): single `Standard_D2as_v7` node, system-assigned
+  managed identity, **Azure CNI Overlay with the Cilium data plane** (pod CIDR
+  `192.168.0.0/16`, service CIDR `10.100.0.0/16`) 
+  
 
 ## 3. Architecture (target)
 
