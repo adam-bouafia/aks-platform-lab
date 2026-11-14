@@ -1,0 +1,36 @@
+# NOTE: in Audit mode, not Deny. Phase 2b (cosign keyless signing) has not
+# been wired into ci.yml yet, and the ledger-api image deployed in Phase 4
+# was built straight into ACR with `az acr build`, unsigned. Enforcing this
+# would block the application itself. See notes/failures.md and
+# docs/decisions/ADR-003-policy-engines.md. Flip validationActions to [Deny]
+# once Phase 2b lands and every deployed image is signed.
+#
+# Also rewritten for current Kyverno's CEL-based policy API - the legacy
+# kyverno.io/v1 ClusterPolicy verifyImages rule used in the original
+# PROJECT-PLAN.md draft no longer executes (see notes/failures.md).
+apiVersion: policies.kyverno.io/v1
+kind: NamespacedImageValidatingPolicy
+metadata:
+  name: verify-image-signature
+  namespace: ledger
+spec:
+  validationActions: [Audit]
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+  matchImageReferences:
+    - glob: "acrledgerlab.azurecr.io/*"
+  attestors:
+    - name: github_actions_keyless
+      cosign:
+        keyless:
+          identities:
+            - issuer: "https://token.actions.githubusercontent.com"
+              subject: "https://github.com/adam-bouafia/aks-platform-lab/*"
+  validations:
+    - expression: >-
+        images.containers.map(image, verifyImageSignatures(image, [attestors.github_actions_keyless])).all(e, e > 0)
+      message: "Image is not signed by a trusted GitHub Actions workflow identity."

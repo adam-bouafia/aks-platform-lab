@@ -7,13 +7,25 @@ resource "azurerm_kubernetes_cluster" "main" {
 
   role_based_access_control_enabled = true
 
+  oidc_issuer_enabled       = true # required for workload identity - lets pods exchange a Kubernetes token for an Entra token
+  workload_identity_enabled = true
+  azure_policy_enabled      = true
+
+  key_vault_secrets_provider {
+    secret_rotation_enabled = true # CSI driver polls Key Vault and updates the mounted file, ~2 min interval
+  }
+
+  oms_agent {
+    log_analytics_workspace_id = azurerm_log_analytics_workspace.main.id
+  }
+
   api_server_access_profile {
     authorized_ip_ranges = ["109.94.154.182/32"] # Adam's current public IPv4 - AKS authorized_ip_ranges is IPv4-only (no IPv6 support); update this if the ISP-assigned IP changes
   }
 
   default_node_pool {
     name           = "system"
-    node_count     = 1
+    node_count     = 2 # 1 node couldn't fit AKS's own system pods (metrics-server, ama-logs, gatekeeper, workload-identity webhook) alongside the app + observability stack - see notes/failures.md
     vm_size        = "Standard_D2as_v7"
     vnet_subnet_id = azurerm_subnet.aks.id
   }

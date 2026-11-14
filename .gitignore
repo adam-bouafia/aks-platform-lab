@@ -1,5 +1,6 @@
 PROJECT-PLAN.md
 *.todo
+app/app
 # ==========================================
 # Secrets, Keys & Environment Variables
 # ==========================================
@@ -34,6 +35,7 @@ override.tf.json
 .terraformrc
 terraform.rc
 *.tfplan
+tfplan*
 
 # ==========================================
 # Kubernetes & Helm

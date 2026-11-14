@@ -1,0 +1,8 @@
+// ledger-api error logs, parsed from the JSON fields the app writes to stdout
+// via log/slog. Container Insights lands stdout in ContainerLogV2.
+ContainerLogV2
+| where ContainerName == "ledger-api"
+| extend parsed = parse_json(LogMessage)
+| where tostring(parsed.level) == "ERROR"
+| project TimeGenerated, PodName, route = tostring(parsed.route), status = tostring(parsed.status), duration_ms = tostring(parsed.duration_ms), msg = tostring(parsed.msg)
+| order by TimeGenerated desc

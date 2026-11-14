@@ -1,0 +1,21 @@
+# NOTE: rewritten for Kyverno v1.20+, which removed execution of the legacy
+# kyverno.io/v1 ClusterPolicy type used in the original PROJECT-PLAN.md draft
+# (see notes/failures.md). Current Kyverno validates via the Kubernetes
+# ValidatingAdmissionPolicy-style CEL API (policies.kyverno.io).
+apiVersion: policies.kyverno.io/v1
+kind: NamespacedValidatingPolicy
+metadata:
+  name: disallow-latest-tag
+  namespace: ledger
+spec:
+  validationActions: [Deny]
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+  validations:
+    - expression: >-
+        object.spec.containers.all(c, !c.image.endsWith(':latest'))
+      message: "Images must be pinned by tag or digest, not :latest."

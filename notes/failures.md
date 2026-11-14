@@ -257,3 +257,252 @@ Fix:         Closed the PR without merging; branch deleted.
 Prevent:     This IS the prevention mechanism - confirms the Trivy severity gate
              and branch protection together stop a vulnerable image from reaching
              main.
+
+## 2026-11-14 New Azure subscription: AKS stuck/failed from unregistered resource providers (x5)
+
+Symptom:     Switched to a brand-new Azure subscription (fresh account, no prior
+             resource provider registrations). `terraform apply` for the AKS
+             foundation and later for Key Vault, Log Analytics, and the
+             `oms_agent`/monitoring addon each failed in turn with
+             `MissingSubscriptionRegistration` for a different namespace:
+             `Microsoft.Compute`, `Microsoft.ContainerService`, `Microsoft.Network`,
+             `Microsoft.ContainerRegistry`, `Microsoft.KeyVault`,
+             `Microsoft.OperationalInsights`, `Microsoft.OperationsManagement`,
+             and finally `microsoft.insights` (hit again later via
+             `az aks enable-addons --addons monitoring`).
+Looked at:   The exact error names the missing namespace. `az provider show -n
+             <Namespace> --query registrationState` confirmed each one as
+             `NotRegistered`.
+Root cause:  A fresh subscription has none of Azure's resource provider
+             namespaces registered. Each Azure service (Compute, AKS, VNets, ACR,
+             Key Vault, Log Analytics, Azure Monitor/Insights) needs its own
+             provider registered before the first resource of that type can be
+             created, and this only surfaces when you actually try to create one.
+Fix:         `az provider register --namespace <Namespace>` for each one, then
+             poll `az provider show` until `Registered` (took ~1-2 minutes each),
+             then re-plan and re-apply.
+Prevent:     On any brand-new subscription, register the full provider list
+             (`Microsoft.Compute`, `Microsoft.ContainerService`,
+             `Microsoft.Network`, `Microsoft.ContainerRegistry`,
+             `Microsoft.KeyVault`, `Microsoft.OperationalInsights`,
+             `Microsoft.OperationsManagement`, `Microsoft.ManagedIdentity`,
+             `microsoft.insights`) up front, before the first `terraform apply`,
+             instead of discovering them one at a time mid-apply.
+
+## 2026-11-14 AKS provisioningState stuck on Failed after a mid-update provider error
+
+Symptom:     After the `Microsoft.OperationsManagement` registration error
+             interrupted an `azurerm_kubernetes_cluster` update, Terraform's next
+             `apply` reported success (`Apply complete!`, outputs printed), but
+             `az aks show --query provisioningState` still returned `Failed`, and
+             none of the newly-enabled addons (Key Vault CSI driver, Container
+             Insights `ama-logs`, Azure Policy/Gatekeeper) had actually been
+             scheduled onto the node (`kubectl get pods -A` showed only the
+             baseline system pods).
+Looked at:   `terraform plan` after the "successful" apply showed `0 to add, 1 to
+             change` (a minor, unrelated drain-timeout drift) - the addon fields
+             weren't in the diff, so Terraform considered its job done and never
+             re-sent them to Azure. `az aks show --query provisioningState` kept
+             returning `Failed` even after that apply.
+Root cause:  The failed update left AKS's own `provisioningState` stuck, and a
+             later Terraform apply that doesn't touch the same fields (because
+             Terraform's state already "knows" they're set) never re-triggers
+             Azure to retry provisioning them.
+Fix:         `az aks disable-addons -a monitoring` then `az aks enable-addons -a
+             monitoring --workspace-resource-id <law-id>` (after the `microsoft.
+             insights` registration above) - an explicit disable/re-enable cycle
+             forces a fresh reconcile attempt, which this time succeeded end to
+             end and flipped `provisioningState` back to `Succeeded`.
+Prevent:     After any Terraform apply that errors out partway on an Azure
+             resource, don't trust `terraform plan` showing "no changes" as proof
+             the cluster is healthy - check `az aks show --query provisioningState`
+             directly. If it's stuck on `Failed`, force a retry via the specific
+             `az aks disable-addons`/`enable-addons` pair rather than waiting for
+             an unrelated Terraform diff to happen to touch it.
+
+## 2026-11-14 Single-node lab cluster couldn't fit the app plus the observability stack
+
+Symptom:     After deploying `ledger-api` (2 replicas) on top of the already-
+             running AKS system addons (metrics-server, `ama-logs`, CoreDNS,
+             workload-identity webhook, Gatekeeper/Azure Policy), both pods stuck
+             in `Pending` with `FailedScheduling: 0/1 nodes are available: 1
+             Insufficient cpu`. `kubectl describe node` also showed a live
+             `OOMKilling` event against Grafana, which had just been installed.
+Looked at:   `kubectl describe node` -> Allocated resources showed CPU requests
+             already at 99% *before* `ledger-api` was added. Breaking it down per
+             pod (`kubectl get pods -A -o json`, summed `resources.requests.cpu`)
+             showed the biggest consumers were AKS's own system pods, not
+             anything we chose to install: `metrics-server` (2x156m),
+             `ama-logs` (2x150m), `coredns` (2x100m), the workload-identity
+             webhook (2x100m), Gatekeeper (3x100m).
+Root cause:  A single `Standard_D2as_v7` (2 vCPU) node's allocatable CPU is
+             consumed almost entirely by AKS's own mandatory system pods once
+             Key Vault CSI, Container Insights, and Azure Policy are all
+             enabled - there was never enough headroom left for the app, let
+             alone Prometheus/Grafana/Trivy Operator on top.
+Fix:         Scaled `default_node_pool.node_count` from 1 to 2 in `infra/aks.tf`
+             (an in-place Terraform update, no node pool replacement) - cheapest
+             fix that stayed well within the subscription's 10-vCPU family quota
+             and 10-vCPU total regional cap.
+Prevent:     Don't assume a 1-node "cheapest possible" AKS lab cluster has spare
+             capacity for anything beyond the bare system addons. Budget for AKS's
+             own addon overhead (easily 1-1.5 vCPU on a 2-vCPU node) before sizing
+             for the actual workload, especially once Container Insights, Key
+             Vault CSI, and Azure Policy are all turned on together.
+
+## 2026-11-14 Grafana OOM-killed at startup with a 256Mi memory limit
+
+Symptom:     Even after scaling to 2 nodes, Grafana's pod was stuck in
+             `CrashLoopBackOff`. `kubectl describe pod` showed `Last State:
+             Terminated, Reason: OOMKilled, Exit Code: 137` during startup,
+             before it ever became ready.
+Looked at:   Grafana's own startup logs showed it installing a long list of
+             bundled datasource plugins (`grafana-postgresql-datasource`,
+             `stackdriver`, `loki`, `tempo`, `cloudwatch`, and about a dozen
+             more) during boot, before the process had even reached a steady
+             state.
+Root cause:  The lab's deliberately tight `limits.memory: 256Mi` for Grafana
+             (set to keep the footprint small) was below what current Grafana
+             actually needs just to finish its plugin-install boot sequence, let
+             alone run afterwards.
+Fix:         Raised Grafana's `resources.requests.memory` to 256Mi and
+             `limits.memory` to 512Mi in
+             `deploy/observability/kube-prometheus-stack-values.yaml`, then
+             `helm upgrade`.
+Prevent:     Don't size a Helm chart's memory limit purely off "what the running
+             process should need" - check what it needs to *start*, especially
+             for anything that installs plugins or runs migrations on boot.
+
+## 2026-11-14 ServiceMonitor created no scrape target: Service needs its own `app` label, not just `selector.app`
+
+Symptom:     `ledger-api`'s `ServiceMonitor` and its NetworkPolicy allow-rule were
+             both correctly applied, Prometheus's generated config clearly
+             contained a `serviceMonitor/ledger/ledger-api/0` job, yet
+             `/api/v1/targets` never listed it as active - `ledger-api` never
+             showed up, not even as "down". It appeared only in
+             `/api/v1/targets?state=any` under `droppedTargets`, with a fully
+             populated, correct-looking `discoveredLabels` block (right pod IP,
+             right port, right metrics path).
+Looked at:   Pulled the live scrape config from Prometheus's own
+             `/api/v1/status/config` HTTP endpoint (the only way to see it - the
+             `prometheus` container is distroless with no `cat`/`ls`/shell, so
+             `kubectl exec ... cat ...` fails silently with an "executable not
+             found" error that's easy to misread as "empty/no match" when piped
+             through `grep`). The generated `relabel_configs` for the job
+             included: `source_labels: [__meta_kubernetes_service_label_app,
+             __meta_kubernetes_service_labelpresent_app], regex: (ledger-api);
+             true, action: keep`.
+Root cause:  Prometheus Operator turns a `ServiceMonitor`'s `selector.matchLabels`
+             into a relabel-time `keep` rule against the **Service object's own
+             metadata labels** - not the Pod's labels, and not the Service's
+             `spec.selector`. `deploy/helm/ledger-api/templates/service.yaml` set
+             `spec.selector.app: ledger-api` (which correctly wires the Service to
+             the right Pods) but had no `metadata.labels` at all, so
+             `__meta_kubernetes_service_labelpresent_app` was `false` and the keep
+             rule silently dropped every target.
+Fix:         Added `metadata.labels: {app: ledger-api}` to the Service, matching
+             what the ServiceMonitor's selector expects, then `helm upgrade`.
+Prevent:     A ServiceMonitor's `selector` must match the **Service's own
+             labels**, not its `spec.selector` (which only controls which Pods
+             the Service routes to) and not the Pod's labels directly. When a
+             target silently never appears (not even unhealthy), check
+             `droppedTargets` via `?state=any` and read the relabel_configs from
+             `/api/v1/status/config` rather than assuming it's a NetworkPolicy or
+             RBAC problem.
+
+## 2026-11-14 Kyverno v1.20+ removed execution of the legacy `kyverno.io/v1 ClusterPolicy` type
+
+Symptom:     Applying the three Kyverno policies from PROJECT-PLAN.md's Phase 5
+             (`kyverno.io/v1 ClusterPolicy` with `validate`/`verifyImages` rules)
+             all failed at `kubectl apply` with: "Kyverno v1.20 removed execution
+             of legacy kyverno.io policy types and no longer accepts create or
+             update requests for them ... migrate to ValidatingPolicy,
+             MutatingPolicy, GeneratingPolicy or ImageValidatingPolicy
+             (policies.kyverno.io)".
+Looked at:   `kubectl api-resources | grep kyverno` showed both the old
+             `kyverno.io/v1 ClusterPolicy` (listed as a real, readable resource
+             type) and the new CEL-based `policies.kyverno.io/v1` types
+             (`ValidatingPolicy`, `ImageValidatingPolicy`,
+             `NamespacedValidatingPolicy`, `NamespacedImageValidatingPolicy`,
+             etc.) side by side, and `kubectl explain` against the new types to
+             get their real field names (CEL `validations[].expression`,
+             `matchConstraints.resourceRules`, `attestors[].cosign.keyless`).
+Root cause:  The project plan was written assuming the legacy declarative
+             `validate`/`verifyImages` rule style; the Helm chart's current
+             `kyverno/kyverno` has moved entirely to Kubernetes
+             ValidatingAdmissionPolicy-style CEL expressions and no longer runs
+             the old type at all (read/list/delete only).
+Fix:         Rewrote all three as `NamespacedValidatingPolicy` (the two plain
+             validations) and `NamespacedImageValidatingPolicy` (the signature
+             check), scoped to the `ledger` namespace, using CEL expressions
+             (`object.spec.containers.all(c, ...)`) instead of JSON-pattern
+             `validate` blocks.
+Prevent:     Don't trust a project plan's exact manifest syntax for a fast-moving
+             admission-control project without checking `kubectl api-resources`
+             and `kubectl explain` against what's actually installed first -
+             Kyverno's own migration guide
+             (https://kyverno.io/docs/guides/migration-to-cel/) says this
+             removal is permanent going forward, not a deprecation warning.
+
+## 2026-11-14 Kyverno CEL image-signature expression: wrong syntax for referencing an attestor by name
+
+Symptom:     After fixing the ClusterPolicy->CEL migration above,
+             `verify-image-signature` (Audit mode) was accepted by the API server
+             but every evaluation recorded `result: error` in its
+             `EphemeralReport`, not `pass` or `fail`: "unsupported native
+             conversion from string to 'v1alpha1.Attestor'".
+Looked at:   The CEL expression was
+             `verifyImageSignatures(image, ['github-actions-keyless'])` - passing
+             the attestor's *name* as a bare string.
+Root cause:  `verifyImageSignatures()` expects actual Attestor objects, exposed
+             through a CEL variable named `attestors` (one property per declared
+             attestor, by name), not a list of name strings.
+Fix:         Changed the expression to
+             `verifyImageSignatures(image, [attestors.github_actions_keyless])`
+             (and renamed the attestor from `github-actions-keyless` to
+             `github_actions_keyless`, since CEL property access escapes `-` to
+             `__dash__`, which is uglier than just avoiding dashes in the name).
+Prevent:     When a Kyverno CEL policy's `EphemeralReport` shows `result: error`
+             (not `fail`), that's a CEL evaluation error in the policy itself, not
+             a real validation failure - check the report's `message` field for
+             a CEL type error before assuming the image/resource is actually
+             non-compliant.
+
+## 2026-11-14 Kyverno image-signature check can't authenticate to our own private ACR
+
+Symptom:     After fixing the CEL syntax above, `verify-image-signature` still
+             recorded `result: error` on a real pod using our own ACR image -
+             this time: "DefaultAzureCredential: failed to acquire a token ...
+             WorkloadIdentityCredential: no client ID specified ...
+             ManagedIdentityCredential: failed to authenticate a system assigned
+             identity. The endpoint responded with ... Multiple user assigned
+             identities exist, please specify the clientId ... AzureCLICredential:
+             fork/exec /bin/sh: permission denied".
+Looked at:   The `credentials.providers: [azure]` option exists on
+             `ImageValidatingPolicy`/`NamespacedImageValidatingPolicy`, but
+             Kyverno's own admission-controller pod has no workload identity
+             wired up (no `azure.workload.identity/client-id` annotation on its
+             ServiceAccount, no federated identity credential, no
+             `azure.workload.identity/use: "true"` pod label) - the VM's IMDS
+             does have multiple user-assigned identities attached (the AKS
+             addons' own identities plus the kubelet identity), so
+             `ManagedIdentityCredential` can't guess which one to use, and
+             there's no shell in Kyverno's container for `AzureCLICredential`'s
+             fallback to even attempt.
+Root cause:  Reading a private registry's manifest/signature data (as opposed to
+             just pulling the image, which the kubelet's own `AcrPull` role
+             already covers) needs Kyverno's *own* pod identity to have registry
+             read access - that was never wired up.
+Fix:         Not fixed. Documented as a known gap (`docs/security.md`) instead of
+             spending the time to give Kyverno's admission controller its own
+             federated identity credential + AcrPull role: the policy runs in
+             Audit mode specifically because Phase 2b (cosign signing) was never
+             implemented, so even with working registry credentials the
+             signature check would always fail (there is no signature to find).
+             Fixing the credential wiring without also doing the signing work
+             would not change the practical outcome.
+Prevent:     If `verify-image-signature` is ever flipped to `Enforce`, wire a
+             dedicated workload identity for Kyverno's admission-controller
+             ServiceAccount (its own federated credential + `AcrPull` on the
+             target registry) *and* implement Phase 2b cosign signing in CI first
+             - doing either alone doesn't get you a working check.
