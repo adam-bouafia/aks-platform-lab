@@ -8,7 +8,7 @@ resource "azurerm_kubernetes_cluster" "main" {
   role_based_access_control_enabled = true
 
   api_server_access_profile {
-    authorized_ip_ranges = ["77.63.82.164/32"] # Adam's current public IPv4 - AKS authorized_ip_ranges is IPv4-only (no IPv6 support); update this if the ISP-assigned IP changes
+    authorized_ip_ranges = ["109.94.154.182/32"] # Adam's current public IPv4 - AKS authorized_ip_ranges is IPv4-only (no IPv6 support); update this if the ISP-assigned IP changes
   }
 
   default_node_pool {
