@@ -1,0 +1,6 @@
+// Pod restarts in the ledger namespace over the last 24 hours.
+KubePodInventory
+| where Namespace == "ledger"
+| where TimeGenerated > ago(24h)
+| summarize RestartCount = max(ContainerRestartCount) by PodName = Name, bin(TimeGenerated, 1h)
+| order by TimeGenerated desc

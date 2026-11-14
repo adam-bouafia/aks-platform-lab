@@ -1,0 +1,17 @@
+# Low concurrency: this is a 1-node lab cluster, a default scan job flood
+# would starve the node. One scan job at a time, keep resources small.
+trivy:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 100Mi
+    limits:
+      cpu: 200m
+      memory: 300Mi
+
+operator:
+  scanJobsConcurrentLimit: 1
+  scannerReportTTL: "24h"
+
+serviceMonitor:
+  enabled: false # kube-prometheus-stack is already scraping the app itself; keep this lab's surface small

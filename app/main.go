@@ -16,7 +16,27 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+)
+
+var (
+	httpRequestsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "http_requests_total",
+			Help: "Total HTTP requests, by route and status code.",
+		},
+		[]string{"route", "code"},
+	)
+	httpRequestDuration = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "http_request_duration_seconds",
+			Help:    "HTTP request duration in seconds, by route.",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"route"},
+	)
 )
 
 var secretPath = getenv("SECRET_PATH", "/mnt/secrets/api-key")
@@ -119,18 +139,39 @@ func listTransactions(w http.ResponseWriter, r *http.Request) {
 
 }
 
+// statusRecorder wraps a ResponseWriter so the status code it was given can
+// be read back afterwards - net/http's ResponseWriter has no getter for it.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (s *statusRecorder) WriteHeader(code int) {
+	s.status = code
+	s.ResponseWriter.WriteHeader(code)
+}
+
 func withLogging(route string, h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 
 		if rand.Float64() < errorRate {
-			w.WriteHeader(http.StatusInternalServerError)
-			fmt.Fprintln(w, "injected error")
-			slog.Error("request", "route", route, "status", 500, "duration_ms", time.Since(start).Milliseconds())
+			rec.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprintln(rec, "injected error")
+			slog.Error("request", "route", route, "status", rec.status, "duration_ms", time.Since(start).Milliseconds())
+			recordMetrics(route, rec.status, start)
 			return
 		}
 
-		h(w, r)
-		slog.Info("request", "route", route, "duration_ms", time.Since(start).Milliseconds())
+		h(rec, r)
+		slog.Info("request", "route", route, "status", rec.status, "duration_ms", time.Since(start).Milliseconds())
+		recordMetrics(route, rec.status, start)
 	}
+}
+
+func recordMetrics(route string, status int, start time.Time) {
+	code := strconv.Itoa(status)
+	httpRequestsTotal.WithLabelValues(route, code).Inc()
+	httpRequestDuration.WithLabelValues(route).Observe(time.Since(start).Seconds())
 }

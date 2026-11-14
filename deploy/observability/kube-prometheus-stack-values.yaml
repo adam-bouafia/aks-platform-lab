@@ -1,0 +1,41 @@
+# Minimal footprint values for a lab cluster: short retention, no persistent
+# volumes (nothing to reclaim after `terraform destroy`), light resources.
+prometheus:
+  prometheusSpec:
+    retention: 6h
+    resources:
+      requests:
+        cpu: 50m
+        memory: 256Mi
+      limits:
+        cpu: 200m
+        memory: 512Mi
+    storageSpec: {} # no PVC - ephemeral, lab only
+    serviceMonitorSelectorNilUsesHelmValues: false
+
+grafana:
+  adminPassword: admin # lab only, never do this in production
+  persistence:
+    enabled: false
+  resources:
+    requests:
+      cpu: 20m
+      memory: 256Mi
+    limits:
+      cpu: 200m
+      memory: 512Mi # 256Mi OOM-killed Grafana at startup - current Grafana installs several bundled plugins on boot, see notes/failures.md
+
+alertmanager:
+  enabled: false # not wiring a real receiver in the lab
+
+nodeExporter:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+
+kubeStateMetrics:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 64Mi

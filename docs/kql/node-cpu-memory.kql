@@ -1,0 +1,6 @@
+// Node CPU and memory utilization percentage, averaged over 5-minute bins.
+Perf
+| where ObjectName == "K8SNode"
+| where CounterName in ("cpuUsagePercentage", "memoryUsagePercentage")
+| summarize AvgValue = avg(CounterValue) by Computer, CounterName, bin(TimeGenerated, 5m)
+| order by TimeGenerated desc

@@ -1,0 +1,22 @@
+# See the note in disallow-latest-tag.yaml - rewritten for current Kyverno's
+# CEL-based policy API.
+apiVersion: policies.kyverno.io/v1
+kind: NamespacedValidatingPolicy
+metadata:
+  name: require-requests-limits
+  namespace: ledger
+spec:
+  validationActions: [Deny]
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+  validations:
+    - expression: >-
+        object.spec.containers.all(c,
+          has(c.resources.requests) && has(c.resources.requests.cpu) && has(c.resources.requests.memory) &&
+          has(c.resources.limits) && has(c.resources.limits.cpu) && has(c.resources.limits.memory)
+        )
+      message: "Every container must declare CPU/memory requests and limits."

@@ -1,0 +1,33 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: ledger-api-rules
+  namespace: ledger
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: ledger-api
+      rules:
+        - alert: LedgerApiHighErrorRate
+          expr: |
+            sum(rate(http_requests_total{code=~"5.."}[5m]))
+            /
+            sum(rate(http_requests_total[5m]))
+            > 0.05
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "ledger-api 5xx ratio above 5% for 5 minutes"
+            description: "{{ $value | humanizePercentage }} of requests are failing with a 5xx status."
+
+        - alert: LedgerApiNotEnoughReplicas
+          expr: |
+            kube_deployment_status_replicas_ready{namespace="ledger", deployment="ledger-api"} < 2
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "ledger-api has fewer than 2 ready replicas"
+            description: "Only {{ $value }} ready replicas for 5 minutes - the PodDisruptionBudget allows one to be unavailable, this means something else is wrong."

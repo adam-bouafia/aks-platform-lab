@@ -1,0 +1,19 @@
+image:
+  repository: acrledgerlab.azurecr.io/ledger-api
+  digest: sha256:f0703b1f0a9b3ad91e87be8e395d8499d70a6d10db85f85b68b5cba6b5d98d46
+
+replicaCount: 2
+
+port: 8080
+
+workloadIdentityClientId: "" # set via --set from the Terraform output `ledger_api_identity_client_id`
+keyVaultName: ""              # set via --set from the Terraform output `key_vault_name`
+tenantId: ""                  # set via --set from the Terraform output `tenant_id`
+
+resources:
+  requests:
+    cpu: 20m
+    memory: 32Mi
+  limits:
+    cpu: 100m
+    memory: 64Mi
