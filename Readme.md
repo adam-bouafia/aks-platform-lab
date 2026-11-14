@@ -4,6 +4,8 @@ This repository contains AKS lab materials.
 
 The lab is designed to understand how to secure Azure Kubernetes Service (AKS) environment by implementing best practices and security features.
 
+Screenshots for every phase: [docs/screenshots.md](docs/screenshots.md).
+
 ## Image hardening numbers
 
 `ledger-api` is built two ways, from the same source code, to show what image hardening
