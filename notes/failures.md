@@ -110,3 +110,95 @@ Prevent:     When a wrapper action's documented inputs don't make the exact comm
              a Node action) rather than guessing from the README's short description
              alone - the parameter names can look interchangeable but build very
              different commands underneath.
+
+## 2026-11-14 Terraform apply failed: region not allowed for student subscription
+
+Symptom:     `terraform apply` created the resource group in `westeurope` fine,
+             then failed creating the VNet with 403 Forbidden:
+             "RequestDisallowedByAzure: Resource ... was disallowed by Azure:
+             This policy maintains a set of best available regions where your
+             subscription can deploy resources."
+Looked at:   `az policy assignment list` on the subscription, found a system
+             policy assignment `sys.regionrestriction` ("Allowed resource
+             deployment regions") with `listOfAllowedLocations`:
+             francecentral, spaincentral, swedencentral, germanywestcentral,
+             italynorth. `westeurope` is not in that list.
+Root cause:  "Azure for Students" subscriptions get a built-in Azure policy
+             restricting which regions resources can actually be deployed into
+             - a quota/abuse-prevention measure, not a bug in the Terraform
+             code. Resource-group creation itself succeeded in westeurope
+             because RG location metadata isn't covered by this policy; any
+             regional resource (VNet, AKS, etc.) is.
+Fix:         Changed `location` to `germanywestcentral` (closest allowed region
+             to NL) on the resource group; everything else already referenced
+             it via `azurerm_resource_group.main.location` instead of a
+             hardcoded string, so only one line needed to change. Resource
+             group had to be destroyed and recreated (location forces
+             replacement), then VNet + subnet created cleanly.
+Prevent:     Before deploying any new Azure resource type in this project
+             (ACR, Key Vault, Log Analytics, AKS), check it against this same
+             allowed-region list first - don't assume westeurope works just
+             because the resource group accepted it.
+
+## 2026-11-14 Terraform apply failed: provider version drift (field renames + new required block)
+
+Symptom:     `terraform plan` on `aks.tf` failed with two errors:
+             `Insufficient node_provisioning_profile blocks` ("At least 1
+             node_provisioning_profile blocks are required") and
+             `Unsupported argument` on `network_dataplane` ("Did you mean
+             network_data_plane?").
+Looked at:   `terraform providers schema -json` on `azurerm_kubernetes_cluster`
+             confirmed `node_provisioning_profile` has `min_items: 1` in
+             provider v5.14.0, with fields `mode` and `default_node_pools`.
+Root cause:  Written against older/tutorial field names and an older provider
+             schema. azurerm v5.x renamed `network_dataplane` to
+             `network_data_plane`, and added a newer AKS feature (Node
+             Autoprovisioning) that the schema now requires an explicit
+             opt-in/opt-out for via `node_provisioning_profile` - no implicit
+             default anymore.
+Fix:         Renamed the field to `network_data_plane`, added
+             `node_provisioning_profile { mode = "Manual" }` (explicit opt-out
+             of AKS auto-provisioning, since nodes are managed via
+             `default_node_pool` instead).
+Prevent:     When a resource block errors with "Unsupported argument" or a
+             "required block missing" right after bumping/installing a new
+             provider version, check `terraform providers schema -json` for
+             the resource in question rather than assuming the Terraform code
+             itself is wrong - provider schemas change between major/minor
+             releases.
+
+## 2026-11-14 Terraform apply failed: Microsoft.ContainerService provider not registered
+
+Symptom:     `terraform apply` on `aks.tf` failed creating the cluster with
+             409 Conflict: "MissingSubscriptionRegistration: The subscription
+             is not registered to use namespace 'Microsoft.ContainerService'."
+Looked at:   This is a fresh "Azure for Students" subscription that had never
+             created an AKS cluster (or any ContainerService resource) before.
+Root cause:  Azure resource providers (namespaces like Microsoft.ContainerService,
+             Microsoft.Network, etc.) must be explicitly registered per
+             subscription before their resource types can be created. Brand
+             new or rarely-used subscriptions often have common ones
+             registered already (Network, Storage) but less common ones
+             (ContainerService) not yet.
+Fix:         `az provider register --namespace Microsoft.ContainerService`,
+             then polled `az provider show -n Microsoft.ContainerService
+             --query registrationState` until it reported `Registered`
+             (took about a minute). Re-ran `terraform apply` with no code
+             changes - it proceeded past the point of the earlier error.
+Prevent:     On a fresh subscription, before the first `terraform apply` that
+             uses a resource type you haven't deployed before on it, check
+             `az provider list --query "[?registrationState!='Registered']"`
+             for anything relevant and register it ahead of time instead of
+             discovering it mid-apply.
+
+## 2026-11-13 Break-it drill: unhardened image rejected by CI
+
+Symptom:     N/A - deliberate test. Opened a PR replacing the distroless final
+             stage with `FROM golang:1.26` to reintroduce ~183 HIGH/CRITICAL CVEs.
+Looked at:   Build & Trivy Scan job on the PR; failed at the HIGH/CRITICAL gate step.
+Root cause:  N/A - intentional regression to verify the CI gate actually blocks
+             a bad image rather than just passing everything.
+Fix:         Closed the PR without merging; branch deleted.
+Prevent:     This IS the prevention mechanism - confirms the Trivy severity gate
+             and branch protection together stop a vulnerable image from reaching
+             main.
