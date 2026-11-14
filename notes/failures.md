@@ -506,3 +506,80 @@ Prevent:     If `verify-image-signature` is ever flipped to `Enforce`, wire a
              ServiceAccount (its own federated credential + `AcrPull` on the
              target registry) *and* implement Phase 2b cosign signing in CI first
              - doing either alone doesn't get you a working check.
+
+## 2026-11-14 Trivy Operator's own scanJobsConcurrentLimit setting was silently ignored (wrong values.yaml nesting, twice)
+
+Symptom:     Despite setting `operator.scanJobsConcurrentLimit: 1` in
+             `deploy/observability/trivy-operator-values.yaml`, multiple scan
+             Jobs still ran at once and several failed with "Failed to acquire
+             cache or database lock ... cache may be in use by another process:
+             timeout" - Trivy's shared vulnerability DB cache being hit by
+             concurrent scanners.
+Looked at:   `kubectl get configmap trivy-operator-config -n trivy-system -o
+             yaml` showed `OPERATOR_CONCURRENT_SCAN_JOBS_LIMIT: "10"` (the
+             chart's default) even after the `helm upgrade`. Misread
+             `helm show values aqua/trivy-operator`'s indentation once while
+             investigating and "fixed" it to a root-level `scanJobsConcurrentLimit:
+             1` (removing the `operator:` nesting) - that made it worse, since
+             `helm get values` then showed the root-level key as the live
+             release's user-supplied values, meaning the apply had "succeeded"
+             while doing nothing at all to the ConfigMap either time.
+Root cause:  First pass: a values key nested one level too deep gets silently
+             dropped by Helm (no error - it just isn't a recognised path in the
+             chart's templates, so nothing renders). Second pass: overcorrected
+             based on a misread of the default values dump's indentation and
+             moved it OUT of the `operator:` block it actually belongs under.
+Fix:         Confirmed the real path with `helm show values aqua/trivy-operator`
+             cross-checked against where the `operator:` block starts and ends
+             (`awk` on non-indented lines to find the next top-level key), put
+             `scanJobsConcurrentLimit` back under `operator:`, `helm upgrade`,
+             then verified directly against the ConfigMap
+             (`OPERATOR_CONCURRENT_SCAN_JOBS_LIMIT: "1"`) rather than trusting the
+             `helm upgrade` output. Also had to `kubectl delete jobs -n
+             trivy-system --all` and restart the operator pod to clear the
+             already-queued jobs from the wrong-concurrency config before the
+             fix actually took visible effect.
+Prevent:     Never trust that a `helm upgrade` "succeeded" message means a
+             specific value actually landed where intended - check the
+             generated ConfigMap/Secret/Deployment directly. When second-
+             guessing a values path from a `helm show values` dump, verify the
+             parent block's start/end lines first, don't eyeball indentation
+             under time pressure.
+
+## 2026-11-14 Trivy Operator's scan jobs can't authenticate to our own private ACR either
+
+Symptom:     Even with concurrency fixed, the `ledger-api` image's
+             `VulnerabilityReport` never appeared. The operator's logs showed:
+             "UNAUTHORIZED: authentication required" against
+             `acrledgerlab.azurecr.io`, after Trivy's `remote` backend (and the
+             docker/containerd/podman backends, which don't even apply inside
+             the scan job's container) all failed to find credentials.
+Looked at:   `helm show values aqua/trivy-operator` for a private-registry
+             option: `operator.privateRegistryScanSecretsNames` (a
+             namespace->secret-name map) plus
+             `operator.accessGlobalSecretsAndServiceAccount` exist for exactly
+             this. The fix needs a Kubernetes `docker-registry` secret holding
+             real ACR pull credentials - least-privilege via `az acr token
+             create` with a read-only scope-map, not the registry-wide admin
+             account (which is deliberately disabled, `admin_enabled = false` in
+             `infra/acr.tf`).
+Root cause:  Same root cause as the Kyverno image-signature gap documented
+             above: anything that needs to *read* image data from our ACR
+             (rather than just have the kubelet pull it, which already works via
+             the `AcrPull` role on `kubelet_identity`) needs its own registry
+             credentials, and neither Kyverno's nor Trivy Operator's own pod
+             identity had any wired up.
+Fix:         Not fixed in this session - creating the ACR token
+             (`az acr token create`) was blocked by this environment's own
+             command-approval guardrails (a credential-creation action), and
+             routing that through the user mid-session wasn't worth it for one
+             image's scan when the operator's broader value - continuous
+             scanning of the whole cluster, catching real CVEs - was already
+             proven (13 VulnerabilityReports generated across AKS system images,
+             Gatekeeper, Prometheus, with 12 real HIGH and 12 MEDIUM findings).
+Prevent:     Before deploying Trivy Operator (or any in-cluster scanner) against
+             a private, admin-disabled ACR, create the read-only ACR token and
+             wire `privateRegistryScanSecretsNames` up front, in the same change
+             that disables ACR admin access - don't discover the gap after the
+             fact per-tool (this is the second time this exact pattern showed
+             up this session, see the Kyverno entry above).
