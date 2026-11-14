@@ -46,15 +46,98 @@ Dockerfile's base image.
 
 ## Infrastructure (Terraform)
 
-`infra/` holds the Azure foundation, applied from a local machine via `az login`
+`infra/` holds the whole Azure foundation, applied from a local machine via `az login`
+(no CI deployment - this account's tenant does not allow service principal
+creation on a student/trial subscription, so Terraform never runs from GitHub
+Actions here).
 
-- Resource group, VNet (`10.10.0.0/16`) and an AKS subnet (`10.10.1.0/24`) applied.
-- AKS cluster (`aks-ledger-lab`): single `Standard_D2as_v7` node, system-assigned
-  managed identity, **Azure CNI Overlay with the Cilium data plane** (pod CIDR
-  `192.168.0.0/16`, service CIDR `10.100.0.0/16`) 
-  
+- Resource group, VNet (`10.10.0.0/16`), AKS subnet (`10.10.1.0/24`).
+- AKS cluster `aks-ledger-lab`, 2 nodes (`Standard_D2as_v7`), **Azure CNI Overlay with
+  the Cilium data plane** (pod CIDR `192.168.0.0/16`, service CIDR `10.100.0.0/16`,
+  `NetworkPolicy` enforced natively - see `docs/decisions/ADR-001-cni.md`).
+- ACR (`admin_enabled = false`, pull only via the kubelet's managed identity).
+- Key Vault (RBAC-authorized, a `random_password` secret, no password anywhere in
+  code, CI, or the image).
+- Log Analytics workspace + Container Insights (`oms_agent` add-on).
+- A user-assigned identity (`id-ledger-api`) federated to the AKS OIDC issuer, so
+  the pod exchanges a Kubernetes token for an Entra token with no secret stored.
+- `azure_policy_enabled = true` (Audit mode, the built-in restricted-standards
+  initiative) and the Key Vault Secrets Provider CSI driver.
 
-## 3. Architecture (target)
+## Secure deployment (`deploy/`)
+
+`ledger-api` runs in a dedicated `ledger` namespace under Pod Security Admission
+`restricted`, deployed with Helm (`deploy/helm/ledger-api/`):
+
+- 2 replicas, spread across nodes (`topologySpreadConstraints`), a
+  `PodDisruptionBudget` (`minAvailable: 1`).
+- Non-root, read-only root filesystem, every capability dropped, no privilege
+  escalation.
+- The API key is never in the image, a Kubernetes Secret, or CI - it is pulled live
+  from Key Vault by the Secrets Store CSI driver, authenticated via the pod's
+  workload identity:
+
+  ```bash
+  curl -s -o /dev/null -w "%{http_code}\n" localhost:8080/api/v1/transactions   # 401
+  API_KEY=$(az keyvault secret show --vault-name <kv-name> --name api-key --query value -o tsv)
+  curl -H "X-API-Key: $API_KEY" localhost:8080/api/v1/transactions              # 200, real data
+  ```
+
+- `NetworkPolicy`: default-deny ingress and egress, explicit allows only for DNS
+  and the app port from the `ledger`/`monitoring` namespaces. Verified directly:
+  a pod outside `ledger` times out reaching the service; even a pod *inside*
+  `ledger` with no explicit allow rule is blocked on egress (stricter than most
+  defaults - see `notes/failures.md`).
+
+## Guardrails (`deploy/policies/`)
+
+Kyverno (CEL-based `NamespacedValidatingPolicy`/`NamespacedImageValidatingPolicy` -
+the project's original legacy-API draft no longer runs on current Kyverno, see
+`notes/failures.md`), enforced and verified live against test pods:
+
+- `disallow-latest-tag` - **Deny**, confirmed rejecting a PSA-compliant `:latest` pod.
+- `require-requests-limits` - **Deny**, confirmed rejecting a pod with no
+  resources block.
+- `verify-image-signature` - **Audit**, not Deny: Phase 2b (cosign signing in CI)
+  was never wired up, so enforcing would block the app's own unsigned image. See
+  `docs/decisions/ADR-003-policy-engines.md` and `docs/security.md`.
+
+## Observability (`deploy/observability/`)
+
+`kube-prometheus-stack` (Prometheus + Grafana, small footprint: 6h retention, no
+PVCs) scrapes `ledger-api`'s `/metrics` via a `ServiceMonitor`:
+
+- A RED Grafana dashboard (`ledger-api-dashboard.json`) - request rate, 5xx ratio,
+  p50/p95/p99 latency, ready replicas - confirmed showing live data from real
+  `curl` traffic.
+- A `PrometheusRule`: fires when the 5xx ratio is above 5% for 5 minutes, or ready
+  replicas drop below 2. Both rules load with `health: ok`.
+- Container Insights (Log Analytics) covers logs: three saved KQL queries in
+  `docs/kql/` for errors, pod restarts, and node CPU/memory.
+
+## Vulnerability management loop
+
+- `.github/workflows/nightly-scan.yml` rescans the deployed image on GHCR every
+  night and opens a GitHub issue on new HIGH/CRITICAL findings.
+- Trivy Operator runs in-cluster, continuously scanning every workload - proven
+  against the rest of the cluster (13 `VulnerabilityReports`, 12 real HIGH and 12
+  MEDIUM findings on AKS system images) but **not** against `ledger-api` itself:
+  the operator's scan jobs hit the same ACR-authentication gap as Kyverno's
+  signature check (ACR admin is deliberately disabled). See `docs/security.md`'s
+  "Known gaps" for the honest accounting and the fix.
+
+## Honest gaps (not hidden)
+
+- Image signing (Phase 2b, cosign) was never wired into CI.
+- `local_account_disabled` is not set on the cluster (kept local `kubectl` access
+  working rather than risk a lockout mid-session).
+- Kyverno and Trivy Operator can't read our own ACR's image/signature data (the
+  kubelet's `AcrPull` role covers normal pulls, but not these tools' own checks).
+
+Full detail, root causes, and fixes for every one of these in `docs/security.md`
+and `notes/failures.md`.
+
+## Architecture
 
 ```mermaid
 flowchart LR
